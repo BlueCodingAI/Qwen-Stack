@@ -1,0 +1,6 @@
+# core.autocrlf=true would otherwise hand Ubuntu a script whose shebang ends in
+# \r ("bad interpreter: /usr/bin/env bash^M"). Pin the endings per file type.
+*.sh  text eol=lf
+*.py  text eol=lf
+*.yaml text eol=lf
+*.ps1 text eol=crlf
