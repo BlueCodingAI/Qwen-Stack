@@ -31,16 +31,28 @@ def tunnel_ok() -> bool:
     except Exception:
         return False
 
-def running_worker():
-    """Returns (ssh_host, ssh_port) for a running instance, else None."""
+def instances():
     try:
         out = subprocess.run(["vastai", "show", "instances", "--raw", "--full"],
                              capture_output=True, text=True, timeout=60).stdout
-        for i in json.loads(out):
-            if i.get("actual_status") == "running" and i.get("ssh_host"):
-                return i["ssh_host"], i["ssh_port"]
+        return json.loads(out)
     except Exception as e:
         log(f"instance lookup failed: {e}")
+        return []
+
+def running_worker():
+    """Returns (ssh_host, ssh_port) for a running instance, else None."""
+    for i in instances():
+        if i.get("actual_status") == "running" and i.get("ssh_host"):
+            return i["ssh_host"], i["ssh_port"]
+    return None
+
+def stopped_instance():
+    """A stopped instance still holds the 51 GB model, so restarting it (~24s) is far
+    cheaper than a router wake that may rebuild from scratch (~2-3 min)."""
+    for i in instances():
+        if i.get("actual_status") in ("exited", "stopped"):
+            return i.get("id")
     return None
 
 async def wake():
@@ -80,11 +92,17 @@ def main():
 
         w = running_worker()
         if not w:
-            log("no running worker - waking via router (cold start, ~2 min)")
-            try:
-                asyncio.run(wake())
-            except Exception as e:
-                log(f"wake failed: {e}; retrying"); time.sleep(20); continue
+            sid = stopped_instance()
+            if sid:
+                log(f"instance {sid} is stopped - restarting it (disk retained, ~24s)")
+                subprocess.run(["vastai", "start", "instance", str(sid)],
+                               capture_output=True, text=True, timeout=120)
+            else:
+                log("no instance at all - waking via router (full cold start, ~2-3 min)")
+                try:
+                    asyncio.run(wake())
+                except Exception as e:
+                    log(f"wake failed: {e}; retrying"); time.sleep(20); continue
             for _ in range(40):
                 w = running_worker()
                 if w: break

@@ -1,29 +1,54 @@
-# Shuts down the local gateway. Leaves the Vast side intact ON PURPOSE.
+# Shuts down the local gateway and STOPS (does not destroy) the Vast worker.
 #
-# With cold_workers=0 and inactivity_timeout=900, Vast STOPS the worker ~15 min after
-# the last request and keeps its disk. That means:
-#   - GPU billing ($1.20/hr) stops
-#   - disk billing continues (~150 GB x $0.1333/GB/mo ~= $20/mo)
-#   - the next start is a restart, not a rebuild: ~24s instead of ~2-3 min
+# Stopping keeps the instance's disk, so the 51 GB model stays downloaded and the
+# next start is a restart (~24s) rather than a rebuild (~2-3 min).
 #
-# That is the deliberate trade. To pay literally nothing between sessions instead,
-# use stop-qwen-full.ps1, which also deletes the workergroup and destroys the disk.
+# Billing after this runs:
+#   GPU  $1.20/hr  -> $0        (stopped immediately, not after the 15 min timeout)
+#   disk ~$0.1333/GB/month      -> continues while the instance exists
+#
+# Persistent volumes were evaluated as a cheaper alternative and rejected: the
+# $0.004/GB/mo volume offers sit on storage-only hosts, and of the 2 machines with
+# both an RTX PRO 6000 and volume capacity, the cheapest volume was $0.2933/GB/mo
+# -- more than instance disk, on a $1.989/hr GPU.
+#
+# To pay nothing at all between sessions, use stop-qwen-full.ps1 instead.
 
 $ErrorActionPreference = "Continue"
 
-Write-Host "stopping local services ..." -ForegroundColor Cyan
+Write-Host "1/2  stopping local services ..." -ForegroundColor Cyan
 $killed = 0
 Get-CimInstance Win32_Process -Filter "Name like '%python%' or Name like '%litellm%' or Name like '%ssh%'" |
   Where-Object { $_.CommandLine -match 'tunnel_supervisor|normalize_proxy|litellm_config|18000:127\.0\.0\.1:18000' } |
   ForEach-Object {
-      Write-Host "   killing pid $($_.ProcessId)" -ForegroundColor DarkGray
+      Write-Host "     killing pid $($_.ProcessId)" -ForegroundColor DarkGray
       try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; $killed++ } catch {}
   }
-if ($killed -eq 0) { Write-Host "   (nothing was running)" -ForegroundColor DarkGray }
+if ($killed -eq 0) { Write-Host "     (nothing was running)" -ForegroundColor DarkGray }
 
-Write-Host ""
-Write-Host "Local gateway down." -ForegroundColor Green
-Write-Host "Vast worker will stop itself ~15 min after its last request; disk is kept" -ForegroundColor Yellow
-Write-Host "(~`$20/mo standby) so the next start-qwen takes ~24s." -ForegroundColor Yellow
-Write-Host ""
-Write-Host "To stop paying entirely, run: .\stop-qwen-full.ps1" -ForegroundColor DarkGray
+Write-Host "2/2  stopping Vast instance(s), keeping disk ..." -ForegroundColor Cyan
+$any = $false
+try {
+    foreach ($i in (& vastai show instances --raw --full 2>$null | ConvertFrom-Json)) {
+        $any = $true
+        if ($i.actual_status -eq "running") {
+            Write-Host "     stopping $($i.id) (disk $($i.disk_space) GB kept)" -ForegroundColor DarkGray
+            & vastai stop instance $i.id | Out-Null
+        } else {
+            Write-Host "     $($i.id) already $($i.actual_status)" -ForegroundColor DarkGray
+        }
+    }
+} catch {}
+if (-not $any) { Write-Host "     no instances found" -ForegroundColor DarkGray }
+
+Start-Sleep -Seconds 6
+try {
+    $inst = @(& vastai show instances --raw --full 2>$null | ConvertFrom-Json)
+    Write-Host ""
+    foreach ($i in $inst) {
+        $mo = [math]::Round($i.disk_space * $i.storage_cost, 2)
+        Write-Host "  instance $($i.id): $($i.actual_status)  disk $($i.disk_space) GB  ~`$$mo/month standby" -ForegroundColor Yellow
+    }
+    if ($inst.Count -eq 0) { Write-Host "  no instances - nothing billing at all" -ForegroundColor Green }
+    else { Write-Host "`n  GPU billing stopped. Run .\start-qwen.ps1 to resume (~24s)." -ForegroundColor Green }
+} catch {}
