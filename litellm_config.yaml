@@ -1,0 +1,22 @@
+model_list:
+  # Chain: Claude Code -> LiteLLM :4000 -> normalize_proxy :8100 -> SSH tunnel :18000
+  #
+  # normalize_proxy fixes this model's strict Jinja chat template, which
+  # raise_exception()s (opaque HTTP 500) rather than degrading:
+  #   - merges all system messages into one at index 0
+  #   - remaps reasoning_effort high -> xhigh (template allows only xhigh|medium|low)
+  #
+  # The tunnel replaces Vast's routing SDK on the hot path: the router does a lookup
+  # per request against an API limited to 1 req/sec, returns HTTP 429 under Claude
+  # Code's request rate and backs off (measured 1-18s/call). Tunnel: steady ~1.1-2s.
+  #
+  # hosted_vllm/ (not openai/) because LiteLLM's /v1/messages bridge routes openai/
+  # models to the Responses API (/v1/responses), which llama.cpp does not implement.
+  - model_name: qwen38-27b-heretic
+    litellm_params:
+      model: hosted_vllm/qwen38-27b-heretic
+      api_base: http://127.0.0.1:8100/v1
+      api_key: "dummy"
+litellm_settings:
+  drop_params: true
+  request_timeout: 1800
