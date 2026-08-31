@@ -1,15 +1,60 @@
 # Running the Qwen stack on an Ubuntu VPS
 
-The `.sh` scripts are twins of the `.ps1` ones — same chain, same endpoint, same
-billing behaviour. `tunnel_supervisor.py` and `normalize_proxy.py` are unchanged;
-they were already cross-platform.
+The `.sh` scripts are twins of the `.ps1` ones — same chain, same containers,
+same billing behaviour. `normalize_proxy.py` is shared as-is;
+`tunnel_supervisor.py` is shared too and picks its behaviour from `VAST_MODE`
+(`serverless` or `direct`), which the start scripts set for you.
 
-| Windows              | Ubuntu                  | what it does                                     |
-|----------------------|-------------------------|--------------------------------------------------|
-| `.\start-qwen.ps1`   | `./start-qwen.sh`       | bring the stack up (~24s warm, ~2-3 min cold)     |
-| `.\stop-qwen.ps1`    | `./stop-qwen.sh`        | stop GPU billing, keep the 51 GB model on disk    |
-| `.\stop-qwen-full.ps1` | `./stop-qwen-full.sh` | destroy everything, pay nothing between sessions  |
-| `. .\use-qwen.ps1`   | `source ./use-qwen.sh`  | point *this shell's* Claude Code at Qwen          |
+| Windows                   | Ubuntu                    | what it does                                  |
+|---------------------------|---------------------------|-----------------------------------------------|
+| `.\start-qwen.ps1`        | `./start-qwen.sh`         | serverless: bring the stack up                |
+| `.\stop-qwen.ps1`         | `./stop-qwen.sh`          | serverless: stop GPU billing, keep the disk   |
+| `.\stop-qwen-full.ps1`    | `./stop-qwen-full.sh`     | serverless: destroy everything on the account |
+| `.\start-qwen-direct.ps1` | `./start-qwen-direct.sh`  | direct: rent one instance yourself            |
+| `.\stop-qwen-direct.ps1`  | `./stop-qwen-direct.sh`   | direct: destroy that one instance             |
+| `. .\use-qwen.ps1`        | `source ./use-qwen.sh`    | point *this shell's* Claude Code at Qwen      |
+
+## Two ways to get a GPU
+
+Both end at the same place - LiteLLM on :4000, the normalization proxy on :8100,
+an SSH tunnel to llama-server on :18000 - and both build the container from the
+same template hash. They differ only in who owns the machine.
+
+**Serverless** (`start-qwen.sh`): an endpoint plus a workergroup, and Vast's
+autoscaler creates the worker. It scales to zero after ~15 min idle, which also
+means it disappears mid-session and has to be woken again.
+
+**Direct** (`start-qwen-direct.sh`): you rent one ordinary instance, it stays
+yours until you destroy it, and `stop-qwen-direct.sh` destroys it. Nothing
+scales it away, nothing wakes it for you, and once it is gone the bill is $0.
+Prefer this if you want billing you can reason about in one line.
+
+```bash
+./start-qwen-direct.sh --dry-run   # print the offer it would rent, bill nothing
+./start-qwen-direct.sh             # rent the cheapest match, bring the stack up
+source ./use-qwen.sh && claude
+./stop-qwen-direct.sh              # destroy it   -> $0.00/hr and $0/month
+./stop-qwen-direct.sh --keep-disk  # only stop it -> $0.00/hr, ~$21/month standby
+```
+
+`--keep-disk` keeps the 51 GB of weights, so the next start is a ~24s restart
+instead of a ~2-3 min re-download. Without it the instance is gone completely.
+
+The direct scripts only ever touch **their own** instance - the id in
+`.run/instance_id`, or one labelled `qwen-direct`. Anything else on the account
+is reported and left alone. The two serverless stop scripts are the opposite:
+`stop-qwen.sh` stops *every* instance on the account and `stop-qwen-full.sh`
+destroys *every* instance — including one you rented in direct mode. If you use
+both modes, stop each with its own script.
+
+Re-running `start-qwen-direct.sh` reuses a running instance and restarts a
+stopped one; it never rents a second GPU. Otherwise direct mode runs the same
+three local services, so `.run/*.log`, re-run safety and the port-forwarding
+advice below all apply unchanged.
+
+Useful knobs (env vars): `QWEN_DISK` (default 160 GB), `QWEN_LABEL`,
+`QWEN_SEARCH` (the offer query), `QWEN_TEMPLATE`, and `--offer <id>` to pin one
+specific machine.
 
 ## One-time setup
 
@@ -38,9 +83,17 @@ chmod +x *.sh
 
 ```bash
 source .venv/bin/activate
-./start-qwen.sh                  # ~$1.20/hr starts here
+./start-qwen.sh                  # serverless; ~$1.20/hr starts here
 source ./use-qwen.sh && claude   # this shell now talks to Qwen
 ./stop-qwen.sh                   # GPU billing stops; disk (~$21/mo) keeps the model
+```
+
+or, renting the instance yourself:
+
+```bash
+./start-qwen-direct.sh           # rents one instance, prints its id and $/hr
+source ./use-qwen.sh && claude
+./stop-qwen-direct.sh            # destroys it - nothing left billing
 ```
 
 Unlike the Windows version there are no minimized windows. Each service is a
@@ -111,3 +164,5 @@ they get reaped when `ExecStart` returns, run the scripts by hand instead.
 | `Permissions 0644 ... are too open` | `chmod 600 ~/.ssh/runpod_key` — `start-qwen.sh` does this for you |
 | `tunnel :18000 never came up` | check `.run/supervisor.log`; a cold worker re-downloads 51 GB |
 | `litellm :4000 died on startup` | port already taken, or the venv is not active — the script tails the log for you |
+| direct: `tunnel :18000 never came up` on a fresh rental | the container is still pulling; `vastai logs <id>` shows llama-server's own output. If that template ever stops serving :18000, set `QWEN_IMAGE` + `QWEN_ONSTART` to launch a plain container instead |
+| direct: "no instance of ours found" | already destroyed, or `.run/instance_id` is gone and the instance has no `qwen-direct` label — `vastai show instances` lists what is actually billing |

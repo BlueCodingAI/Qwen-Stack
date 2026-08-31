@@ -43,7 +43,9 @@ if (-not $any) { Write-Host "     no instances found" -ForegroundColor DarkGray 
 
 Start-Sleep -Seconds 6
 try {
-    $inst = @(& vastai show instances --raw --full 2>$null | ConvertFrom-Json)
+    $data = & vastai show instances --raw --full 2>$null | ConvertFrom-Json
+    $inst = @()
+    if ($null -ne $data) { $inst = @($data) }
     Write-Host ""
     foreach ($i in $inst) {
         $mo = [math]::Round($i.disk_space * $i.storage_cost, 2)
