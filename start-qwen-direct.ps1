@@ -39,6 +39,12 @@ $LABEL    = "qwen-direct"                        # how the stop script recognise
 $DISK     = 160                                  # GB; the weights are ~51 GB
 $SEARCH   = "gpu_ram>=90 num_gpus=1 inet_down>=4000 disk_space>=160 rentable=true verified=true dph_total<=1.20"
 
+# The template's own onstart plus a fix for the authorized_keys ownership Vast
+# gets wrong, which otherwise makes the instance unreachable over ssh and so
+# unusable - see the comment at the top of that file. It REPLACES the template's
+# onstart, so the two have to stay in step.
+$ONSTART  = Join-Path $here "onstart-direct.sh"
+
 $RUN = Join-Path $here ".run"
 if (-not (Test-Path $RUN)) { New-Item -ItemType Directory $RUN | Out-Null }
 $ID_FILE   = Join-Path $RUN "instance_id"
@@ -48,6 +54,13 @@ $env:VAST_API_KEY  = (Get-Content "$HOME\.config\vastai\vast_api_key" -Raw).Trim
 $env:SHIM_MODEL_ID = "qwen38-27b-heretic"
 $env:VAST_SSH_KEY  = "$HOME\.ssh\runpod_key"
 $env:VAST_MODE     = "direct"
+
+# LiteLLM prints a banner containing non-ASCII characters at startup. Attached to
+# a console that is harmless, but with stdout redirected to a file Python falls
+# back to the locale codec (cp1252 here), the banner raises UnicodeEncodeError
+# and LiteLLM dies with "Application startup failed" before it ever binds :4000.
+# Inherited by every child we launch below.
+$env:PYTHONIOENCODING = "utf-8"
 
 # Windows PowerShell 5.1 quirk: ConvertFrom-Json emits a JSON array as ONE
 # pipeline object, so @(cmd | ConvertFrom-Json) is a 1-element array holding the
@@ -73,6 +86,32 @@ function Get-Ours {
         if ($hit) { return $hit }
     }
     return ($all | Where-Object { $_.label -eq $LABEL } | Select-Object -First 1)
+}
+
+# Background a service with its pid in .run\<name>.pid and its output in
+# .run\<name>.log / .err.log - the convention _common.sh already uses on Linux,
+# and what tunnel_supervisor.py writes when it restarts one of these.
+#
+# The previous launch captured neither, so a proxy that died left nothing behind
+# to explain itself: the only symptom was LiteLLM answering every later request
+# with "Cannot connect to host 127.0.0.1:8100". uvicorn and litellm both log to
+# stderr, so .err.log is usually the interesting half.
+function Start-Bg($name, $exe, $argList) {
+    $p = Start-Process -WindowStyle Minimized $exe -ArgumentList $argList `
+            -WorkingDirectory $here -PassThru `
+            -RedirectStandardOutput (Join-Path $RUN "$name.log") `
+            -RedirectStandardError  (Join-Path $RUN "$name.err.log")
+    Set-Content -Path (Join-Path $RUN "$name.pid") -Value "$($p.Id)" -Encoding ascii
+    Write-Host "     $name pid $($p.Id)  log: .run\$name.err.log" -ForegroundColor DarkGray
+}
+
+# Is something already serving this? Any HTTP answer counts, not just 200: the
+# proxy reports the tunnel's health in its own /health and returns 503 while the
+# GPU is cold, and it is still very much alive. Only a refused connection means
+# nothing is listening.
+function Test-Alive($url) {
+    try { $null = Invoke-WebRequest $url -TimeoutSec 4 -UseBasicParsing; return $true }
+    catch { return ($null -ne $_.Exception.Response) }
 }
 
 function Wait-Url($url, $label, $minutes, $progress) {
@@ -139,9 +178,17 @@ if ($ours) {
         exit 0
     }
 
+    # Refuse to rent rather than rent something unreachable: without this file the
+    # instance comes up with the broken key permissions and bills while no tunnel
+    # can ever reach it.
+    if (-not (Test-Path $ONSTART)) {
+        Write-Error "missing $ONSTART - refusing to rent an instance we could not ssh into."
+        exit 1
+    }
+
     Write-Host "     renting offer $offerId (billing starts now, ~`$$offerDph/hr)" -ForegroundColor Yellow
     $raw = & vastai create instance $offerId --template_hash $TEMPLATE --disk $DISK `
-                --label $LABEL --cancel-unavail --raw 2>&1 | Out-String
+                --label $LABEL --onstart $ONSTART --cancel-unavail --raw 2>&1 | Out-String
     $res = $null
     try { $res = $raw | ConvertFrom-Json } catch {}
     if (-not $res -or -not $res.new_contract) {
@@ -193,19 +240,27 @@ if ($fresh) {
 }
 
 Write-Host "3/4  normalization proxy ..." -ForegroundColor Cyan
-Start-Process -WindowStyle Minimized python `
-  -ArgumentList "-m","uvicorn","normalize_proxy:app","--host","127.0.0.1","--port","8100","--log-level","warning" `
-  -WorkingDirectory $here
+if (Test-Alive "http://127.0.0.1:8100/health") {
+    Write-Host "     already listening on :8100, reusing" -ForegroundColor DarkGray
+} else {
+    Start-Bg proxy python @("-m","uvicorn","normalize_proxy:app","--host","127.0.0.1","--port","8100","--log-level","info")
+}
 Wait-Url "http://127.0.0.1:8100/health" "proxy :8100" 2 $null
 
 Write-Host "4/4  LiteLLM ..." -ForegroundColor Cyan
-Start-Process -WindowStyle Minimized litellm `
-  -ArgumentList "--config","litellm_config.yaml","--port","4000" -WorkingDirectory $here
+if (Test-Alive "http://127.0.0.1:4000/health/liveliness") {
+    Write-Host "     already listening on :4000, reusing" -ForegroundColor DarkGray
+} else {
+    Start-Bg litellm litellm @("--config","litellm_config.yaml","--port","4000")
+}
 Wait-Url "http://127.0.0.1:4000/health/liveliness" "litellm :4000" 3 $null
 
 Write-Host ""
 Write-Host "Ready. In the terminal where you want Qwen:" -ForegroundColor Green
 Write-Host "  . .\use-qwen.ps1 ; claude"
+Write-Host ""
+Write-Host "The supervisor watches all three hops and restarts the proxy or LiteLLM" -ForegroundColor DarkGray
+Write-Host "if either stops answering; logs are in .run\ (supervisor, proxy, litellm, tunnel)." -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "Instance $INSTANCE_ID is yours and bills until you remove it:" -ForegroundColor Yellow
 Write-Host "  .\stop-qwen-direct.ps1             # destroy it - back to `$0"

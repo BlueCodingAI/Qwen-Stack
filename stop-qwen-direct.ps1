@@ -54,6 +54,11 @@ function Get-Ours {
 Write-Host "1/2  stopping local services ..." -ForegroundColor Cyan
 $procs = @(Get-CimInstance Win32_Process -Filter "Name like '%python%' or Name like '%litellm%' or Name like '%ssh%'" |
            Where-Object { $_.CommandLine -match 'tunnel_supervisor|normalize_proxy|litellm_config|18000:127\.0\.0\.1:18000' })
+# The supervisor restarts a proxy or LiteLLM it finds dead, so it dies first -
+# kill it later in the list and it revives them in between. Stop-Process -Force
+# is an uncatchable TerminateProcess, so the supervisor cannot clean up after
+# itself here; this ordering is what makes the teardown stick.
+$procs = @($procs | Sort-Object @{ Expression = { if ($_.CommandLine -match 'tunnel_supervisor') { 0 } else { 1 } } })
 if ($DryRun) {
     if ($procs.Count -eq 0) { Write-Host "     -DryRun: nothing is running" -ForegroundColor DarkGray }
     else { $procs | ForEach-Object { Write-Host "     -DryRun: would kill pid $($_.ProcessId)" -ForegroundColor DarkGray } }

@@ -27,6 +27,39 @@ $env:VAST_ENDPOINT = $ENDPOINT_NAME
 $env:SHIM_MODEL_ID = "qwen38-27b-heretic"
 $env:VAST_SSH_KEY  = "$HOME\.ssh\runpod_key"
 
+# LiteLLM prints a banner containing non-ASCII characters at startup. Attached to
+# a console that is harmless, but with stdout redirected to a file Python falls
+# back to the locale codec (cp1252 here), the banner raises UnicodeEncodeError
+# and LiteLLM dies with "Application startup failed" before it ever binds :4000.
+# Inherited by every child we launch below.
+$env:PYTHONIOENCODING = "utf-8"
+
+$RUN = Join-Path $here ".run"
+if (-not (Test-Path $RUN)) { New-Item -ItemType Directory $RUN | Out-Null }
+
+# Background a service with its pid in .run\<name>.pid and its output in
+# .run\<name>.log / .err.log - the convention _common.sh uses on Linux, and what
+# tunnel_supervisor.py writes when it restarts one of these. Without it a service
+# that dies leaves nothing to explain itself. uvicorn and litellm both log to
+# stderr, so .err.log is usually the interesting half.
+function Start-Bg($name, $exe, $argList) {
+    $p = Start-Process -WindowStyle Minimized $exe -ArgumentList $argList `
+            -WorkingDirectory $here -PassThru `
+            -RedirectStandardOutput (Join-Path $RUN "$name.log") `
+            -RedirectStandardError  (Join-Path $RUN "$name.err.log")
+    Set-Content -Path (Join-Path $RUN "$name.pid") -Value "$($p.Id)" -Encoding ascii
+    Write-Host "     $name pid $($p.Id)  log: .run\$name.err.log" -ForegroundColor DarkGray
+}
+
+# Is something already serving this? Any HTTP answer counts, not just 200: the
+# proxy reports the tunnel's health in its own /health and returns 503 while the
+# worker is cold, and it is still very much alive. Only a refused connection
+# means nothing is listening.
+function Test-Alive($url) {
+    try { $null = Invoke-WebRequest $url -TimeoutSec 4 -UseBasicParsing; return $true }
+    catch { return ($null -ne $_.Exception.Response) }
+}
+
 function Wait-Url($url, $label, $minutes) {
     $deadline = (Get-Date).AddMinutes($minutes)
     do {
@@ -58,14 +91,19 @@ Start-Process -WindowStyle Minimized python -ArgumentList "-u","tunnel_superviso
 Wait-Url "http://127.0.0.1:18000/health" "tunnel :18000" 10
 
 Write-Host "3/4  normalization proxy ..." -ForegroundColor Cyan
-Start-Process -WindowStyle Minimized python `
-  -ArgumentList "-m","uvicorn","normalize_proxy:app","--host","127.0.0.1","--port","8100","--log-level","warning" `
-  -WorkingDirectory $here
+if (Test-Alive "http://127.0.0.1:8100/health") {
+    Write-Host "     already listening on :8100, reusing" -ForegroundColor DarkGray
+} else {
+    Start-Bg proxy python @("-m","uvicorn","normalize_proxy:app","--host","127.0.0.1","--port","8100","--log-level","info")
+}
 Wait-Url "http://127.0.0.1:8100/health" "proxy :8100" 2
 
 Write-Host "4/4  LiteLLM ..." -ForegroundColor Cyan
-Start-Process -WindowStyle Minimized litellm `
-  -ArgumentList "--config","litellm_config.yaml","--port","4000" -WorkingDirectory $here
+if (Test-Alive "http://127.0.0.1:4000/health/liveliness") {
+    Write-Host "     already listening on :4000, reusing" -ForegroundColor DarkGray
+} else {
+    Start-Bg litellm litellm @("--config","litellm_config.yaml","--port","4000")
+}
 Wait-Url "http://127.0.0.1:4000/health/liveliness" "litellm :4000" 3
 
 Write-Host ""

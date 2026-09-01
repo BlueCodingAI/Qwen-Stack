@@ -36,6 +36,12 @@ LABEL="${QWEN_LABEL:-qwen-direct}"          # how the stop script recognises our
 DISK="${QWEN_DISK:-160}"                    # GB; the weights are ~51 GB
 SEARCH="${QWEN_SEARCH:-gpu_ram>=90 num_gpus=1 inet_down>=4000 disk_space>=160 rentable=true verified=true dph_total<=1.20}"
 
+# The template's own onstart plus a fix for the authorized_keys ownership Vast
+# gets wrong, which otherwise leaves the instance unreachable over ssh and so
+# unusable - see the comment at the top of that file. It REPLACES the template's
+# onstart rather than adding to it, so the two have to stay in step.
+ONSTART_FILE="${QWEN_ONSTART_FILE:-$here/onstart-direct.sh}"
+
 # Escape hatch: if that template ever turns out to carry serverless-only
 # plumbing, set these two and it launches a plain container instead. Whatever
 # you run must listen on 18000 inside the instance.
@@ -169,8 +175,13 @@ Loosen QWEN_SEARCH (raise dph_total, drop inet_down) and try again."
                  --label "$LABEL" --ssh --direct --env '-p 18000:18000' \
                  --onstart-cmd "$QWEN_ONSTART" --cancel-unavail --raw 2>&1)"
     else
+        # Refuse to rent rather than rent something unreachable: without this file
+        # the instance comes up with the broken key permissions and bills while no
+        # tunnel can ever reach it.
+        [[ -f "$ONSTART_FILE" ]] \
+            || die "missing $ONSTART_FILE - refusing to rent an instance we could not ssh into."
         out="$(vastai create instance "$offer" --template_hash "$TEMPLATE" --disk "$DISK" \
-                 --label "$LABEL" --cancel-unavail --raw 2>&1)"
+                 --label "$LABEL" --onstart "$ONSTART_FILE" --cancel-unavail --raw 2>&1)"
     fi
     INSTANCE_ID="$(python3 -c '
 import json, sys

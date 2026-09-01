@@ -20,6 +20,9 @@ Write-Host "1/2  stopping local services ..." -ForegroundColor Cyan
 $killed = 0
 Get-CimInstance Win32_Process -Filter "Name like '%python%' or Name like '%litellm%' or Name like '%ssh%'" |
   Where-Object { $_.CommandLine -match 'tunnel_supervisor|normalize_proxy|litellm_config|18000:127\.0\.0\.1:18000' } |
+  # supervisor first: it restarts a proxy or LiteLLM it finds dead, so killing it
+  # last would just revive the two we killed before it.
+  Sort-Object @{ Expression = { if ($_.CommandLine -match 'tunnel_supervisor') { 0 } else { 1 } } } |
   ForEach-Object {
       Write-Host "     killing pid $($_.ProcessId)" -ForegroundColor DarkGray
       try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; $killed++ } catch {}

@@ -6,15 +6,26 @@
 # started by hand, or a tunnel left behind by a supervisor that was killed
 # earlier, has no pid file. So: pid files first, then the same command-line
 # patterns the Windows version matches on.
+#
+# Within both passes the supervisor dies first, because it now restarts a proxy
+# or LiteLLM that stops answering.
 
 QWEN_PATTERNS=(tunnel_supervisor normalize_proxy litellm_config '18000:127\.0\.0\.1:18000')
 
 stop_local() {
     local run="$1" killed=0 pid f pat
-    local -a doomed=()
+    local -a doomed=() pidfiles=()
 
+    # The supervisor restarts a proxy or LiteLLM it finds dead, so it has to be
+    # killed first. Left for last - which plain glob order does, since
+    # supervisor.pid sorts after litellm.pid and proxy.pid - it would notice the
+    # two we just killed and start them straight back up.
+    [[ -e "$run/supervisor.pid" ]] && pidfiles+=("$run/supervisor.pid")
     for f in "$run"/*.pid; do
-        [[ -e "$f" ]] || continue
+        [[ -e "$f" && "$f" != "$run/supervisor.pid" ]] && pidfiles+=("$f")
+    done
+
+    for f in ${pidfiles[@]+"${pidfiles[@]}"}; do
         pid="$(cat "$f" 2>/dev/null)"
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             printf '     killing %s pid %s\n' "$(basename "$f" .pid)" "$pid"

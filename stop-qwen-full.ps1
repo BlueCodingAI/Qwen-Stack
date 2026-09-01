@@ -8,6 +8,8 @@ $ENDPOINT_ID = 35555
 Write-Host "1/3  stopping local services ..." -ForegroundColor Cyan
 Get-CimInstance Win32_Process -Filter "Name like '%python%' or Name like '%litellm%' or Name like '%ssh%'" |
   Where-Object { $_.CommandLine -match 'tunnel_supervisor|normalize_proxy|litellm_config|18000:127\.0\.0\.1:18000' } |
+  # supervisor first: it restarts a proxy or LiteLLM it finds dead.
+  Sort-Object @{ Expression = { if ($_.CommandLine -match 'tunnel_supervisor') { 0 } else { 1 } } } |
   ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }
 
 Write-Host "2/3  deleting workergroup(s) ..." -ForegroundColor Cyan
