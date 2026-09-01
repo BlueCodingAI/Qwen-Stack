@@ -37,7 +37,25 @@ Set-Location $here
 $TEMPLATE = "ad7f44ce435d59f8dfd2a16af201ff37"   # Qwen3.8-27B Heretic BF16
 $LABEL    = "qwen-direct"                        # how the stop script recognises our instance
 $DISK     = 160                                  # GB; the weights are ~51 GB
-$SEARCH   = "gpu_ram>=90 num_gpus=1 inet_down>=4000 disk_space>=160 rentable=true verified=true dph_total<=1.20"
+# Sized from what this model actually needs, not from a GPU class. Qwen3.8-27B
+# (gguf arch "qwen35") is a HYBRID attention/SSM model: full_attention_interval=4,
+# so only 16 of its 64 layers keep a KV cache and the other 48 hold a small
+# context-independent SSM state. With head_count_kv=4 and k/v_length=256 that is
+#
+#     weights BF16 + mmproj   50.7 GB
+#     KV cache @ 131072 ctx    8.6 GB   (a normal 27B would want ~32 GB here)
+#     SSM state + buffers      ~3.1 GB
+#     -------------------------------
+#     total                   ~62.4 GB
+#
+# so 80 GB is the real floor with headroom, not 90 - which also lets an A100 80GB
+# qualify instead of only RTX PRO 6000 boards.
+#
+# inet_down is 1000, not 4000: the 4000 floor comes from SERVERLESS mode, where the
+# autoscaler kills a worker that cannot pull 51 GB inside ~940 s. Direct mode has no
+# such deadline, and 4000 was excluding the cheapest hosts outright - the machines it
+# skipped are $1.035/hr against the $1.161 it was holding out for.
+$SEARCH   = "gpu_ram>=80 num_gpus=1 inet_down>=1000 disk_space>=160 rentable=true verified=true dph_total<=1.20"
 
 # The template's own onstart plus a fix for the authorized_keys ownership Vast
 # gets wrong, which otherwise makes the instance unreachable over ssh and so
@@ -157,7 +175,33 @@ if ($ours) {
             if ($null -ne $data) { $offers = @($data) }
         } catch {}
         if ($offers.Count -eq 0) {
-            Write-Error "no offer matched: $SEARCH`nLoosen `$SEARCH (raise dph_total, drop inet_down) and try again."
+            # "no offer matched" on its own leaves you guessing which constraint bit,
+            # and the answer changes minute to minute as machines are taken and freed.
+            # Re-run the search with one constraint dropped at a time so the output
+            # names the one actually blocking and what relaxing it would cost. The
+            # probes are derived from $SEARCH so they cannot drift out of sync with it.
+            function Without($prefix) { (($SEARCH -split ' ') | Where-Object { $_ -notlike "$prefix*" }) -join ' ' }
+            function Count-Offers($q) {
+                $pd = $null
+                try { $pd = & vastai search offers $q -o dph_total --raw 2>$null | ConvertFrom-Json } catch {}
+                return @($pd)
+            }
+            Write-Host ""
+            Write-Host "no offer matched:" -ForegroundColor Red
+            Write-Host "  $SEARCH" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "  what the market has right now, dropping one constraint at a time:" -ForegroundColor Yellow
+            foreach ($p in @(
+                @("without dph_total cap", (Without "dph_total")),
+                @("without inet_down",     (Without "inet_down")),
+                @("without gpu_ram floor", (Without "gpu_ram")))) {
+                $a = Count-Offers $p[1]
+                $c = if ($a.Count) { "cheapest `$$([math]::Round($a[0].dph_total,3))/hr  $($a[0].gpu_name)" } else { "-" }
+                Write-Host ("    {0,-24} {1,3} offers   {2}" -f $p[0], $a.Count, $c) -ForegroundColor DarkGray
+            }
+            Write-Host ""
+            Write-Host "  Whichever line has offers is the constraint to relax in `$SEARCH." -ForegroundColor Yellow
+            Write-Host "  If they all show 0, the market is simply empty - wait and retry." -ForegroundColor Yellow
             exit 1
         }
         $offerId  = $offers[0].id;          $offerDph = $offers[0].dph_total

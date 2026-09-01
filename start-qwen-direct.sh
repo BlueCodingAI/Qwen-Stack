@@ -34,7 +34,25 @@ cd "$here"
 TEMPLATE="${QWEN_TEMPLATE:-ad7f44ce435d59f8dfd2a16af201ff37}"   # Qwen3.8-27B Heretic BF16
 LABEL="${QWEN_LABEL:-qwen-direct}"          # how the stop script recognises our instance
 DISK="${QWEN_DISK:-160}"                    # GB; the weights are ~51 GB
-SEARCH="${QWEN_SEARCH:-gpu_ram>=90 num_gpus=1 inet_down>=4000 disk_space>=160 rentable=true verified=true dph_total<=1.20}"
+# Sized from what this model actually needs, not from a GPU class. Qwen3.8-27B
+# (gguf arch "qwen35") is a HYBRID attention/SSM model: full_attention_interval=4,
+# so only 16 of its 64 layers keep a KV cache and the other 48 hold a small
+# context-independent SSM state. With head_count_kv=4 and k/v_length=256 that is
+#
+#     weights BF16 + mmproj   50.7 GB
+#     KV cache @ 131072 ctx    8.6 GB   (a normal 27B would want ~32 GB here)
+#     SSM state + buffers      ~3.1 GB
+#     -------------------------------
+#     total                   ~62.4 GB
+#
+# so 80 GB is the real floor with headroom, not 90 - which also lets an A100 80GB
+# qualify instead of only RTX PRO 6000 boards.
+#
+# inet_down is 1000, not 4000: the 4000 floor comes from SERVERLESS mode, where the
+# autoscaler kills a worker that cannot pull 51 GB inside ~940 s. Direct mode has no
+# such deadline, and 4000 was excluding the cheapest hosts outright - the machines it
+# skipped are $1.035/hr against the $1.161 it was holding out for.
+SEARCH="${QWEN_SEARCH:-gpu_ram>=80 num_gpus=1 inet_down>=1000 disk_space>=160 rentable=true verified=true dph_total<=1.20}"
 
 # The template's own onstart plus a fix for the authorized_keys ownership Vast
 # gets wrong, which otherwise leaves the instance unreachable over ssh and so
@@ -152,8 +170,34 @@ else
         offer="$WANT_OFFER"
         o_id="$WANT_OFFER"; o_dph="?"; o_gpu="(--offer)"; o_geo="?"; o_inet="?"; o_disk="?"
     else
-        orow="$(pick_offer)" || die "no offer matched: $SEARCH
-Loosen QWEN_SEARCH (raise dph_total, drop inet_down) and try again."
+        if ! orow="$(pick_offer)"; then
+            # "no offer matched" on its own leaves you guessing which constraint bit,
+            # and the answer changes minute to minute as machines are taken and freed.
+            # Drop one constraint at a time so the output names the one blocking. The
+            # probes come from $SEARCH itself, so they cannot drift out of sync.
+            without() { tr ' ' '\n' <<<"$SEARCH" | grep -v "^$1" | tr '\n' ' '; }
+            count_offers() {
+                vastai search offers "$1" -o dph_total --raw 2>/dev/null | python3 -c '
+import json, sys
+try: o = json.load(sys.stdin)
+except Exception: o = []
+if isinstance(o, dict): o = o.get("offers", [])
+if o: print(f"{len(o)} offers   cheapest ${o[0].get(\"dph_total\"):.3f}/hr  {o[0].get(\"gpu_name\")}")
+else: print("0 offers   -")
+' 2>/dev/null || echo "0 offers   -"
+            }
+            echo >&2
+            warn "no offer matched:" >&2
+            dim "  $SEARCH" >&2
+            echo >&2
+            warn "  what the market has right now, dropping one constraint at a time:" >&2
+            for c in dph_total inet_down gpu_ram; do
+                printf '    %-24s %s\n' "without $c" "$(count_offers "$(without "$c")")" >&2
+            done
+            echo >&2
+            die "  Whichever line has offers is the constraint to relax in QWEN_SEARCH.
+  If they all show 0, the market is simply empty - wait and retry."
+        fi
         IFS=$'\t' read -r o_id o_dph o_gpu o_geo o_inet o_disk <<<"$orow"
         offer="$o_id"
     fi
