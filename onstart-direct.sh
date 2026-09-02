@@ -21,8 +21,17 @@
 # running once because the injection can happen after onstart begins.
 #
 # Keep this in step with $TEMPLATE / QWEN_TEMPLATE in start-qwen-direct.{ps1,sh}:
-# --onstart REPLACES the template's own onstart rather than adding to it, so
-# everything below the marker has to stay a faithful copy of it.
+# --onstart REPLACES the template's own onstart rather than adding to it, so the
+# body below has to track the template except where noted.
+#
+# Deliberate deviations from the template, both marked inline below:
+#   1. the authorized_keys repair loop above.
+#   2. llama-server runs -c 262144 instead of -c 131072. Claude Code packs prompts
+#      well past 128K (an observed request was 156,383 tokens) and llama-server
+#      rejects the whole request rather than truncating:
+#        "request (156383 tokens) exceeds the available context size (131072)"
+#      262144 is the model's own trained context_length from the gguf header, and
+#      the extra 8 GiB of KV cache still leaves ~10 GiB free on an 80 GiB card.
 
 (
   while true; do
@@ -35,7 +44,7 @@
   done
 ) >/dev/null 2>&1 &
 
-# ---- verbatim from template ad7f44ce435d59f8dfd2a16af201ff37 ----------------
+# ---- from template ad7f44ce435d59f8dfd2a16af201ff37 (see deviations above) ----
 export HF_TOKEN="${HF_TOKEN:-1}"
 exec > >(tee -a /var/log/onstart.log > /proc/1/fd/1) 2>&1
 echo "[onstart] BEGIN $(date -Is)"
@@ -72,11 +81,14 @@ MMPROJ=/workspace/models/mmproj-Qwen3.8-27B-Q8_0.gguf
   ls -la "$MODEL" "$MMPROJ" 2>&1 | tail -3
 
   echo "[onstart] starting llama-server $(date -Is)"
+  # deviation 2: -c is 262144 here, the template has 131072. See the header.
+  # (A comment cannot go on the -c line itself - it would terminate the
+  #  backslash continuation and detach the pipeline on the last line.)
   "$LLAMA_BIN/llama-server" \
     -m "$MODEL" --mmproj "$MMPROJ" \
     --alias qwen38-27b-heretic \
     --host 127.0.0.1 --port 18000 \
-    -c 131072 -ngl 999 --jinja -fa on --metrics \
+    -c 262144 -ngl 999 --jinja -fa on --metrics \
     2>&1 | tee -a /var/log/portal/llama.log > /proc/1/fd/1
 ) &
 
