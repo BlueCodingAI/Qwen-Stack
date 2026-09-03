@@ -91,11 +91,55 @@ def mine(i):
     return not INSTANCE_ID or str(i.get("id")) == INSTANCE_ID
 
 
-def running_worker():
-    """Returns (ssh_host, ssh_port) for a running instance, else None."""
+def worker_endpoints():
+    """SSH endpoints for our running instance, best first, or None.
+
+    Vast gives an instance two ways in: a proxy (sshN.vast.ai, the ssh_host /
+    ssh_port fields) and usually a direct one (public_ipaddr plus whichever host
+    port is mapped to container port 22). Only the proxy used to be tried, and a
+    broken proxy accepts the TCP connection and then hangs up -
+
+        Connection closed by 3.239.71.116 port 11982
+
+    which from the outside is indistinguishable from a model that never came up.
+    Direct goes first: it skips Vast's proxy entirely. The proxy stays as the
+    fallback because some hosts are behind NAT and offer nothing else.
+    """
     for i in instances():
-        if mine(i) and i.get("actual_status") == "running" and i.get("ssh_host"):
-            return i["ssh_host"], i["ssh_port"]
+        if not (mine(i) and i.get("actual_status") == "running"):
+            continue
+        eps = []
+        mapped = (i.get("ports") or {}).get("22/tcp") or []
+        host_port = mapped[0].get("HostPort") if mapped else None
+        if i.get("public_ipaddr") and host_port:
+            eps.append((str(i["public_ipaddr"]).strip(), int(host_port), "direct"))
+        if i.get("ssh_host"):
+            eps.append((i["ssh_host"], i["ssh_port"], "proxy"))
+        if eps:
+            return eps
+    return None
+
+
+def endpoint_ok(host, port) -> bool:
+    """Can we actually log in here? Cheap probe so a dead endpoint is skipped
+    rather than silently retried for the whole startup window."""
+    try:
+        r = subprocess.run(
+            ["ssh", "-i", SSH_KEY, "-p", str(port), f"root@{host}",
+             "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+             "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "true"],
+            capture_output=True, timeout=40)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def pick_endpoint(eps):
+    """First endpoint that actually accepts a login."""
+    for host, port, kind in eps:
+        if endpoint_ok(host, port):
+            return host, port, kind
+        log(f"ssh {kind} endpoint {host}:{port} refused - trying the next one")
     return None
 
 
@@ -122,13 +166,13 @@ async def wake():
         await c.close()
 
 
-def start_tunnel(host, port):
+def start_tunnel(host, port, kind="?"):
     cmd = ["ssh", "-i", SSH_KEY, "-p", str(port), f"root@{host}", "-N",
            "-L", f"{LOCAL_PORT}:127.0.0.1:{LOCAL_PORT}",
            "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
            "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=20",
            "-o", "ServerAliveCountMax=3"]
-    log(f"opening tunnel -> {host}:{port}")
+    log(f"opening tunnel -> {host}:{port} [{kind}]")
     # ssh's stderr used to go to DEVNULL, which hid the one thing worth seeing.
     # A key Vast wrote as uid 113 rather than root, for instance, fails as
     # "Authentication refused: bad ownership or modes" and otherwise surfaces
@@ -304,7 +348,7 @@ def main():
             except Exception: _tunnel.kill()
             _tunnel = None
 
-        w = running_worker()
+        w = worker_endpoints()
         if not w:
             sid = stopped_instance()
             if sid:
@@ -326,13 +370,19 @@ def main():
                     if MANAGE: check_services()
                     time.sleep(20); continue
             for _ in range(40):
-                w = running_worker()
+                w = worker_endpoints()
                 if w: break
                 time.sleep(5)
             if not w:
                 log("worker never appeared; retrying"); continue
 
-        _tunnel = start_tunnel(*w)
+        ep = pick_endpoint(w)
+        if not ep:
+            log("no ssh endpoint accepted a login (see .run/tunnel.log); will retry")
+            if MANAGE: check_services()
+            time.sleep(15); continue
+        host, port, kind = ep
+        _tunnel = start_tunnel(host, port, kind)
         for _ in range(20):
             time.sleep(3)
             if tunnel_ok():
