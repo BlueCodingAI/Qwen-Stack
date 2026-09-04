@@ -18,7 +18,8 @@ same billing behaviour. `normalize_proxy.py` is shared as-is;
 
 Both end at the same place - LiteLLM on :4000, the normalization proxy on :8100,
 an SSH tunnel to llama-server on :18000 - and both build the container from the
-same template hash. They differ only in who owns the machine.
+same template hash. They differ in who owns the machine, and currently also in
+which weights the container downloads (see below).
 
 **Serverless** (`start-qwen.sh`): an endpoint plus a workergroup, and Vast's
 autoscaler creates the worker. It scales to zero after ~15 min idle, which also
@@ -37,7 +38,7 @@ source ./use-qwen.sh && claude
 ./stop-qwen-direct.sh --keep-disk  # only stop it -> $0.00/hr, ~$21/month standby
 ```
 
-`--keep-disk` keeps the 51 GB of weights, so the next start is a ~24s restart
+`--keep-disk` keeps the 56 GB of weights, so the next start is a ~24s restart
 instead of a ~2-3 min re-download. Without it the instance is gone completely.
 
 The direct scripts only ever touch **their own** instance - the id in
@@ -55,6 +56,25 @@ advice below all apply unchanged.
 Useful knobs (env vars): `QWEN_DISK` (default 160 GB), `QWEN_LABEL`,
 `QWEN_SEARCH` (the offer query), `QWEN_TEMPLATE`, and `--offer <id>` to pin one
 specific machine.
+
+### Which model each mode runs
+
+| mode | weights | set where |
+|---|---|---|
+| direct | `huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF` — `Huihui-Qwen3.8-27B-abliterated-bf16.gguf` (54.7 GB) + `mmproj-model-bf16.gguf` (0.93 GB) | `onstart-direct.sh`, in this repo |
+| serverless | `0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF` — `RVN-BF16.gguf` (53.8 GB) | the onstart baked into template `ad7f44ce...`, in the Vast console |
+
+`vastai create instance` accepts `--onstart`, so direct mode replaces the
+template's onstart with `onstart-direct.sh` and picks its own weights.
+`vastai create workergroup` takes only `--template_hash`, so serverless has no
+such hook and keeps running whatever the template says. Editing the template's
+onstart in the Vast console (or pointing `$TEMPLATE` at a new template) is the
+only way to move serverless onto the same model.
+
+Both are BF16 Qwen3.8-27B abliterated builds of the same `qwen35` architecture
+with the same 262,144-token trained context, so the sizing, flags and proxy
+workarounds are identical - the huihui pair is just ~1.2 GB larger on disk and
+in VRAM, which the 80 GB floor already covers.
 
 ## One-time setup
 

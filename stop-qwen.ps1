@@ -1,6 +1,6 @@
 # Shuts down the local gateway and STOPS (does not destroy) the Vast worker.
 #
-# Stopping keeps the instance's disk, so the 51 GB model stays downloaded and the
+# Stopping keeps the instance's disk, so the model stays downloaded and the
 # next start is a restart (~24s) rather than a rebuild (~2-3 min).
 #
 # Billing after this runs:

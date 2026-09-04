@@ -7,7 +7,7 @@
 #   ./stop-qwen-direct.sh --keep-disk  # only stop it           -> $0.00/hr, ~$21/mo
 #   ./stop-qwen-direct.sh --dry-run    # say what it would do, touch nothing
 #
-# --keep-disk keeps the 51 GB of weights on the instance's disk, so the next
+# --keep-disk keeps the 56 GB of weights on the instance's disk, so the next
 # start is a ~24s restart instead of a ~2-3 min re-download. It is the same
 # trade-off stop-qwen.sh makes; the default here is the opposite, because an
 # instance you rented yourself is yours to pay for until it is gone.

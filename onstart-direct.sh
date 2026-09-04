@@ -24,14 +24,23 @@
 # --onstart REPLACES the template's own onstart rather than adding to it, so the
 # body below has to track the template except where noted.
 #
-# Deliberate deviations from the template, both marked inline below:
+# Deliberate deviations from the template, all marked inline below:
 #   1. the authorized_keys repair loop above.
 #   2. llama-server runs -c 262144 instead of -c 131072. Claude Code packs prompts
 #      well past 128K (an observed request was 156,383 tokens) and llama-server
 #      rejects the whole request rather than truncating:
 #        "request (156383 tokens) exceeds the available context size (131072)"
 #      262144 is the model's own trained context_length from the gguf header, and
-#      the extra 8 GiB of KV cache still leaves ~10 GiB free on an 80 GiB card.
+#      the extra 8 GiB of KV cache still leaves ~9 GiB free on an 80 GiB card.
+#   3. the weights come from huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF, not
+#      the template's 0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF.
+#      Same arch (gguf "qwen35"), same 262144 context_length, same BF16 class:
+#      Huihui-Qwen3.8-27B-abliterated-bf16.gguf is 54.7 GB against RVN-BF16.gguf's
+#      53.8 GB, and the only projector this repo ships is mmproj-model-bf16.gguf
+#      (0.93 GB) where the template used a Q8_0 projector (0.63 GB). So the load
+#      is ~1.2 GB heavier and the flags below are unchanged.
+#      SERVERLESS mode does NOT get this: start-qwen.{sh,ps1} hands Vast the
+#      template hash with no --onstart, so a workergroup still runs the old model.
 
 (
   while true; do
@@ -60,8 +69,8 @@ mkdir -p /var/log/portal /workspace/models
 LLAMA_BIN=/opt/llama.cpp/cuda-12.8
 export LD_LIBRARY_PATH="$LLAMA_BIN:${LD_LIBRARY_PATH:-}"   # else libllama-server-impl.so not found
 
-MODEL=/workspace/models/RVN-BF16.gguf
-MMPROJ=/workspace/models/mmproj-Qwen3.8-27B-Q8_0.gguf
+MODEL=/workspace/models/Huihui-Qwen3.8-27B-abliterated-bf16.gguf
+MMPROJ=/workspace/models/mmproj-model-bf16.gguf
 
 (
   pip install -q --no-cache-dir hf_transfer 'huggingface_hub[cli]' 2>&1 | tail -1
@@ -70,9 +79,9 @@ MMPROJ=/workspace/models/mmproj-Qwen3.8-27B-Q8_0.gguf
   echo "[onstart] DOWNLOAD START $(date -Is)"
   S=$(date +%s)
   # one --include per pattern: positional args after REPO are read as explicit filenames
-  hf download 0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF \
-      --include "RVN-BF16.gguf" \
-      --include "mmproj-Qwen3.8-27B-Q8_0.gguf" \
+  hf download huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF \
+      --include "Huihui-Qwen3.8-27B-abliterated-bf16.gguf" \
+      --include "mmproj-model-bf16.gguf" \
       --local-dir /workspace/models
   E=$(date +%s)
   B=$(du -sb /workspace/models | cut -f1)

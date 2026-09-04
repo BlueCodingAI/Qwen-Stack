@@ -16,6 +16,14 @@
 #                 on late/multiple system messages and on reasoning_effort=high.
 #   supervisor  - rebuilds the tunnel if the worker restarts.
 #
+# NOTE: this mode still serves the OLD model. `create workergroup` takes only a
+# template hash, with no --onstart override, so the worker runs the onstart baked
+# into template ad7f44ce... - which downloads 0bserverx/Qwen3.8-27B-Heretic-
+# Abliterated-Uncensored-GGUF. The swap to huihui-ai/Huihui-Qwen3.8-27B-abliterated-
+# GGUF lives in onstart-direct.sh and therefore reaches DIRECT mode only. To move
+# serverless too, edit the template's onstart in the Vast console (or point
+# $TEMPLATE at a new template) - it cannot be done from this repo.
+#
 # Re-running this script is safe: anything already healthy is reused, not
 # duplicated (a second uvicorn would just fail to bind :8100 anyway).
 #

@@ -31,19 +31,20 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
 . "$here/_common.sh"
 
-TEMPLATE="${QWEN_TEMPLATE:-ad7f44ce435d59f8dfd2a16af201ff37}"   # Qwen3.8-27B Heretic BF16
+TEMPLATE="${QWEN_TEMPLATE:-ad7f44ce435d59f8dfd2a16af201ff37}"   # image only; the model comes
+                                            # from onstart-direct.sh
 LABEL="${QWEN_LABEL:-qwen-direct}"          # how the stop script recognises our instance
-DISK="${QWEN_DISK:-160}"                    # GB; the weights are ~51 GB
+DISK="${QWEN_DISK:-160}"                    # GB; the weights are ~56 GB
 # Sized from what this model actually needs, not from a GPU class. Qwen3.8-27B
 # (gguf arch "qwen35") is a HYBRID attention/SSM model: full_attention_interval=4,
 # so only 16 of its 64 layers keep a KV cache and the other 48 hold a small
 # context-independent SSM state. With head_count_kv=4 and k/v_length=256 that is
 #
-#     weights BF16 + mmproj   50.7 GB
+#     weights BF16 + mmproj   51.8 GB
 #     KV cache @ 131072 ctx    8.6 GB   (a normal 27B would want ~32 GB here)
 #     SSM state + buffers      ~3.1 GB
 #     -------------------------------
-#     total                   ~62.4 GB
+#     total                   ~63.5 GB
 #
 # so 80 GB is the real floor with headroom, not 90 - which also lets an A100 80GB
 # qualify instead of only RTX PRO 6000 boards.
@@ -257,7 +258,7 @@ progress() {
     dim "     ... $INSTANCE_ID is $st   $(tail -n1 "$RUN/supervisor.log" 2>/dev/null | cut -c1-80)"
 }
 if (( FRESH )); then
-    warn "     a fresh instance pulls the image and 51 GB of weights first - up to ~15 min"
+    warn "     a fresh instance pulls the image and 56 GB of weights first - up to ~15 min"
     start_supervisor direct 20 progress
 else
     start_supervisor direct 10 progress

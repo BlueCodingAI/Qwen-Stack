@@ -144,7 +144,7 @@ def pick_endpoint(eps):
 
 
 def stopped_instance():
-    """A stopped instance still holds the 51 GB model, so restarting it (~24s) is far
+    """A stopped instance still holds the downloaded model, so restarting it (~24s) is far
     cheaper than a router wake that may rebuild from scratch (~2-3 min)."""
     for i in instances():
         if mine(i) and i.get("actual_status") in ("exited", "stopped"):
